@@ -5,6 +5,13 @@ source("logL_fns.R")
 #################
 ### screening ###
 #################
+
+###################################
+### this function computes
+###          1. mle of IUPM hat tau
+###          2. maximum probability of an assay outcome over all values of tau
+### for one sample
+###################################
 wrap.get.mle=function(pos,replicates,dilutions,monte=15000,conf.level=0.95,iupm=TRUE,na.rm=FALSE){
   if (sum(pos)==0){
     mle = 0
@@ -18,11 +25,14 @@ wrap.get.mle=function(pos,replicates,dilutions,monte=15000,conf.level=0.95,iupm=
   for (i in 1:length(replicates)){
     maxprob = maxprob * choose(replicates[i],pos[i])
   }
-  result = c(mle,0,maxprob)
+  result = c(mle,maxprob)
   return(result)
 }
-
-### screening step: find plausible configurations
+##################################
+### This function performs the screening step, it returns
+###        1. mle and fisher information for plausible outcomes for each sample
+###        2. plausible combinations of outcomes from assay 1 and 2
+##################################
 findconfig = function(replicates1,dilutions1,replicates2,dilutions2,same.setting = FALSE,thres=0.001){
   temp = list(rep(NA,length(replicates1)))
   for (i in 1:length(replicates1)){
@@ -32,7 +42,7 @@ findconfig = function(replicates1,dilutions1,replicates2,dilutions2,same.setting
   config1 = data.frame(expand.grid(temp))
   result1 = apply(config1,1,wrap.get.mle,replicates=replicates1,dilutions=dilutions1)
   config1$MLE = result1[1,]
-  config1$maxprob = result1[3,]
+  config1$maxprob = result1[2,]
   config1 = config1 %>% arrange(maxprob)
   index1 = sum(cumsum(config1$maxprob)<=thres)
   config1 = config1[-c(1:index1),]
@@ -53,7 +63,7 @@ findconfig = function(replicates1,dilutions1,replicates2,dilutions2,same.setting
     config2 = data.frame(expand.grid(temp))
     result2 = apply(config2,1,wrap.get.mle,replicates=replicates2,dilutions=dilutions2)
     config2$MLE = result2[1,]
-    config2$maxprob = result2[3,]
+    config2$maxprob = result2[2,]
     config2 = config2 %>% arrange(maxprob)
     index2 = sum(cumsum(config2$maxprob)<=0.001)
     config2 = config2[-c(1:index2),]
@@ -75,21 +85,13 @@ findconfig = function(replicates1,dilutions1,replicates2,dilutions2,same.setting
   return(config)
 }
 
-
-### find extreme configurations
-### this one depends on taudiff
+##########################################
+### This function finds extreme outcomes defined as
+### those leading to a test statistic with a larger magnitude than the observed
+### **Currently, only Wald test statistic is allowed**
+##########################################
 findExtreme = function(config,taudiff,pos1,pos2,testmethod,replicates1,replicates2,dilutions1,dilutions2){
-  if (testmethod=="naive"){
-    reps1 = length(pos1)
-    reps2 = length(pos2)
-    tau1hat = config[[1]][apply(t(config[[1]][,1:reps1])==pos1,2,prod)==1,reps1+1]
-    tau2hat = config[[2]][apply(t(config[[2]][,1:reps2])==pos2,2,prod)==1,reps2+1]
-    currentStat = tau1hat-tau2hat-taudiff
-    
-    allstat = config[[3]][,1]-config[[3]][,2]-taudiff
-    extremeConfig = config[[3]][abs(allstat)>=abs(currentStat),c("index1","index2")]
-  }
-  else if (testmethod == "Wald"){
+  if (testmethod == "Wald"){
     reps1 = length(pos1)
     reps2 = length(pos2)
     
@@ -108,42 +110,18 @@ findExtreme = function(config,taudiff,pos1,pos2,testmethod,replicates1,replicate
     allstat = (config[[3]][,1]-config[[3]][,2]-taudiff)/sqrt(1/allinfo1+1/allinfo2)
     
     extremeConfig = config[[3]][abs(allstat)>=abs(currentStat),c("index1","index2")]
-  }
-  
-  ### this is still slow, and tau2hatnull often fall below 0
-  ### change it to log scale and then transform it back
-  else if (testmethod=="LRT"){
-    LR = matrix(0,dim(config[[3]])[1],3)
-    LR[,1] = rep(seq(1:dim(config[[1]])[1]),dim(config[[2]])[1])
-    LR[,2] = rep(seq(1:dim(config[[2]])[1]),each=dim(config[[1]])[1])
-    
-    system.time({for (l in 1:dim(config[[3]])[1]){
-        #print(l)
-        i = LR[l,1]
-        j = LR[l,2]
-        tau2hat = config[[2]][j,"MLE"]
-        tau1hat = config[[1]][i,"MLE"]
-        info2 = config[[2]][j,"info"]
-        info1 = config[[1]][i,"info"]
-        
-        tau2hatnull = exp(log(tau2hat)-info1/(info1+info2)/tau2hat*(taudiff-(tau1hat-tau2hat)))
-        lnull = likenull(pos1=config[[1]][i,1:length(replicates1)],replicates1,dilutions1,
-                         pos2=config[[2]][j,1:length(replicates2)],replicates2,dilutions2,tau2hatnull,taudiff)
-        lfull = likelihood(config[[1]][i,1:length(replicates1)], replicates1, dilutions1, tau1hat)+
-                likelihood(config[[2]][j,1:length(replicates2)], replicates2, dilutions2, tau2hat)
-        LR[l,3] = as.numeric(lnull-lfull)
-    }})
-    index1 = which(apply(t(config[[1]][,1:length(pos1)])==pos1,2,prod)==1)
-    index2 = which(apply(t(config[[2]][,1:length(pos2)])==pos2,2,prod)==1)
-    current = LR[which(LR[,1]==index1 & LR[,2]==index2),3]
-    extremeConfig = LR[LR[,3]>=current,c(1,2)]
+  } else{
+    stop("Only Wald statistic is supported currently! Use testmethod == 'Wald'")
   }
   return(extremeConfig)
 }
 
-### probability under a particular null
+#######################################
+### This function computes the total probability 
+###      of extreme outcomes under given values of Delta and tau2
+#######################################
 calextremep = function(config,extremeConfig, taudiff, tau2,replicates1,replicates2,dilutions1,dilutions2){
-  tau1=taudiff+tau2
+  tau1 = taudiff+tau2
   pos1s = config[[1]][extremeConfig[,1],1:length(replicates1)]
   pos2s = config[[2]][extremeConfig[,2],1:length(replicates2)]
   prob = 1
@@ -158,9 +136,13 @@ calextremep = function(config,extremeConfig, taudiff, tau2,replicates1,replicate
   return(-sum(prob,na.rm=TRUE))
 }
 
-### compute p-value using the M/BB/E approach
+#####################################
+### This function computes p-value using the M/BB/E approach
+###      for testing a specific value of Delta
+#####################################
 mpvalue = function(config,extremeConfig,taudiff,replicates1,replicates2,dilutions1,dilutions2,taul=0,tauu=0,pvalmethod,pos1,pos2){
   if (pvalmethod=="BB"){
+    ### taul and tauu are the lower and upper limit of a 99.5% CI for tau2
     pvalue = (-1)*(optim(par=10,fn=calextremep,config=config,extremeConfig=extremeConfig,taudiff=taudiff,
                     replicates1=replicates1,replicates2=replicates2,dilutions1=dilutions1,dilutions2=dilutions2,
                     method="L-BFGS-B",lower=taul,upper=tauu)$value)
@@ -183,7 +165,10 @@ mpvalue = function(config,extremeConfig,taudiff,replicates1,replicates2,dilution
   return(pvalue)
 }
 
-### this is a wrapper for uniroot
+#######################################
+### This function is a wrapper function to be passed into uniroot,
+###      which will be used to find the exact CI
+#######################################
 onediffp = function(taudiff,config,pos1,pos2,replicates1,replicates2,dilutions1,dilutions2,pvalmethod,testmethod,thres=0.001){
   extremeConfig = findExtreme(config,taudiff, pos1=pos1, pos2=pos2,replicates1=replicates1,
                               replicates2=replicates2,dilutions1=dilutions1,dilutions2=dilutions2,
@@ -193,11 +178,12 @@ onediffp = function(taudiff,config,pos1,pos2,replicates1,replicates2,dilutions1,
   taul = max(CI2[1],CI1[1]-taudiff)
   tauu = min(CI2[2],CI1[2]-taudiff)
   p = mpvalue(config,extremeConfig,taudiff,replicates1,replicates2,dilutions1,dilutions2,taul,tauu,pvalmethod,pos1,pos2)
-  #return((p-0.05)^2)
   return(p-0.05-2*thres)
 }
 
-
+#################################################################
+### main function that computes MLE, exact and asymptotic CIs ###
+#################################################################
 twosample_mle = function(pos1,pos2,replicates1,replicates2,dilutions1,dilutions2,pvalmethod,testmethod){
   config = findconfig(replicates1,dilutions1,replicates2,dilutions2,same.setting=FALSE)
   tau1hat = wrap.get.mle(pos=pos1,replicates=replicates1,dilutions=dilutions1)[1] 
@@ -211,16 +197,17 @@ twosample_mle = function(pos1,pos2,replicates1,replicates2,dilutions1,dilutions2
   aCIup = diffMLE + qnorm(0.975)*se
   CIlow = -10^6
   CIup = 10^6
-  try({CIlow = uniroot(onediffp,interval=c(-100000,diffMLE),config=config, pos1=pos1,pos2=pos2,replicates1=replicates1,replicates2=replicates2,
-                       dilutions1=dilutions1,dilutions2=dilutions2,pvalmethod=pvalmethod,testmethod=testmethod)$root})
-  try({CIup = uniroot(onediffp,interval=c(diffMLE,100000),config=config, pos1=pos1,pos2=pos2,replicates1=replicates1,replicates2=replicates2,
-                      dilutions1=dilutions1,dilutions2=dilutions2,pvalmethod=pvalmethod,testmethod=testmethod)$root})
-  result = vector("list",4)
+  suppressWarnings({
+    try({CIlow = uniroot(onediffp,interval=c(-100000,diffMLE),config=config, pos1=pos1,pos2=pos2,replicates1=replicates1,replicates2=replicates2,
+                         dilutions1=dilutions1,dilutions2=dilutions2,pvalmethod=pvalmethod,testmethod=testmethod)$root})
+    try({CIup = uniroot(onediffp,interval=c(diffMLE,100000),config=config, pos1=pos1,pos2=pos2,replicates1=replicates1,replicates2=replicates2,
+                        dilutions1=dilutions1,dilutions2=dilutions2,pvalmethod=pvalmethod,testmethod=testmethod)$root})
+  })
+  result = vector("list",3)
   result[[1]] = diffMLE
   result[[2]] = c(CIlow,CIup)
   result[[3]] = c(aCIlow,aCIup)
-  result[[4]] = c(pos1,pos2)
-  names(result) = c("delta","exactCI","asympCI","rawAssayResult")
+  names(result) = c("delta","exactCI","asympCI")
   return(result)
 }
 
@@ -235,5 +222,7 @@ dilutions2 = dilutions1
 pos1 = c(2,2,1,1,0,0)
 pos2 = c(1,1,0,0,0,0)
 
-twosample_mle(pos1,pos2,replicates1,replicates2,dilutions1,dilutions2,"E","Wald")
+### only Wald statistic is supported currently
+twosample_mle(pos1,pos2,replicates1,replicates2,dilutions1,dilutions2,
+              pvalmethod = "E",testmethod = "Wald")
 
